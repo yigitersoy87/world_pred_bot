@@ -2,13 +2,13 @@
 Kicktipp WorldPrediction2026 — Telegram Bot
 ============================================
 Commands:
-  /start              - Welcome message
-  /leaderboard        - Overall leaderboard
-  /matchday <N>       - Leaderboard for matchday N (1-15)
-  /scores             - Scores + everyone's predictions for Matchday 1
-  /scores <N>         - Scores + everyone's predictions for Matchday N
-  /today              - Today's matches + predictions
-  /help               - Show available commands
+  /start          - Welcome message
+  /leaderboard    - Overall leaderboard
+  /matchday <N>   - Leaderboard for matchday N (1-15)
+  /scores         - Scores + all predictions for Matchday 1
+  /scores <N>     - Scores + all predictions for Matchday N
+  /today          - Today's matches + predictions
+  /help           - Show available commands
 
 Setup:
   1. pip install python-telegram-bot requests beautifulsoup4
@@ -27,9 +27,9 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-BASE        = "https://www.kicktipp.com/worldprediction2026"
-SEASON_ID   = "4343234"
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BASE      = "https://www.kicktipp.com/worldprediction2026"
+SEASON_ID = "4343234"
 
 MATCHDAY_LABELS = {
     1:"Matchday 1",  2:"Matchday 2",  3:"Matchday 3",
@@ -50,20 +50,25 @@ FLAG = {
     "Serbia":"🇷🇸","Croatia":"🇭🇷","Denmark":"🇩🇰","Poland":"🇵🇱",
     "Ecuador":"🇪🇨","Peru":"🇵🇪","Chile":"🇨🇱","Iran":"🇮🇷",
     "Saudi Arabia":"🇸🇦","New Zealand":"🇳🇿","Wales":"🏴󠁧󠁢󠁷󠁬󠁳󠁿","Ukraine":"🇺🇦",
-    "Austria":"🇦🇹","Tunisia":"🇹🇳","Egypt":"🇪🇬","Nigeria":"🇳🇬",
-    "Ghana":"🇬🇭","Cameroon":"🇨🇲","Venezuela":"🇻🇪","Bolivia":"🇧🇴",
-    "Panama":"🇵🇦","Costa Rica":"🇨🇷","Honduras":"🇭🇳","Jamaica":"🇯🇲",
-    "Indonesia":"🇮🇩","China":"🇨🇳","India":"🇮🇳",
 }
 
-HEADERS = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def get(url, params=None):
+def get_soup(url, params=None):
     r = requests.get(url, params=params, headers=HEADERS, timeout=15)
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
@@ -71,21 +76,38 @@ def get(url, params=None):
 def flag(team):
     return FLAG.get(team, "🏳️")
 
-def result_emoji(result, home_pred, away_pred):
-    """Return ✅ if prediction exactly matches result, 🎯 if tendency correct, ❌ if wrong."""
-    if not result or result == "---" or not home_pred or not away_pred:
-        return ""
+def split_pred_pts(raw):
+    """
+    Kicktipp concatenates prediction + points into one string.
+    e.g. "1-09" → pred="1-0", pts="9"
+         "2-13" → pred="2-1", pts="3"
+         "2-02" → pred="2-0", pts="2"
+         "---"  → pred="---", pts=""
+         ""     → pred="",    pts=""
+    """
+    if not raw or raw.strip() in ("", "---"):
+        return raw.strip(), ""
+    # Match score pattern: digit-digit then optional trailing digits (pts)
+    m = re.match(r'^(\d+-\d+)(\d*)$', raw.strip())
+    if m:
+        return m.group(1), m.group(2)
+    return raw.strip(), ""
+
+def pred_emoji(result, pred):
+    """✅ exact · 🎯 tendency · ❌ wrong · '' if not applicable"""
+    if not result or result == "---" or not pred or pred == "---":
+        return "🔮"
     try:
         rh, ra = map(int, result.split("-"))
-        ph, pa = map(int, home_pred.split("-"))
+        ph, pa = map(int, pred.split("-"))
         if rh == ph and ra == pa:
-            return "✅"  # exact score
-        # correct tendency
+            return "✅"
         if (rh > ra and ph > pa) or (rh < ra and ph < pa) or (rh == ra and ph == pa):
             return "🎯"
         return "❌"
     except Exception:
         return ""
+
 
 # ── Scrapers ──────────────────────────────────────────────────────────────────
 
@@ -93,7 +115,7 @@ def fetch_leaderboard(matchday=None):
     params = {"tippsaisonId": SEASON_ID}
     if matchday:
         params["spieltagIndex"] = matchday
-    soup = get(f"{BASE}/leaderboard", params)
+    soup = get_soup(f"{BASE}/leaderboard", params)
     players = []
     for row in soup.select("table tr"):
         cells = row.find_all("td")
@@ -107,8 +129,6 @@ def fetch_leaderboard(matchday=None):
             "pos":    int(pos_text),
             "name":   name,
             "md_pts": cells[-4].get_text(strip=True) or "0",
-            "bonus":  cells[-3].get_text(strip=True) or "0",
-            "wins":   cells[-2].get_text(strip=True) or "0",
             "total":  cells[-1].get_text(strip=True) or "0",
         })
     return players
@@ -116,41 +136,62 @@ def fetch_leaderboard(matchday=None):
 
 def fetch_predictions(matchday=1):
     """
-    Scrape the leaderboard page which shows each player's prediction per match.
     Returns:
-      matches: list of {label, result}  (e.g. "MEX RSA", "1-0")
-      players: list of {name, preds: [pred_per_match], md_pts, total}
+      matches: [{"label": "MEX RSA", "result": "1-0"}, ...]
+      players: [{"name": "Yiko", "preds": ["2-1", "---", ...], "pts": ["3","",...]}, ...]
+
+    Key fix: Kicktipp puts pred+pts concatenated in each cell e.g. "1-09".
+    We split them with split_pred_pts().
+
+    The match headers are in the leaderboard table header row as link text like:
+      "MEX RSA 1-0"  or  "KOR CZE ---"
     """
     params = {"tippsaisonId": SEASON_ID, "spieltagIndex": matchday}
-    soup = get(f"{BASE}/leaderboard", params)
+    soup = get_soup(f"{BASE}/leaderboard", params)
 
     table = soup.find("table")
     if not table:
         return [], []
 
-    rows = table.find_all("tr")
-    if not rows:
+    all_rows = table.find_all("tr")
+    if len(all_rows) < 2:
         return [], []
 
-    # ── Parse header row for match labels & results ──
-    header_cells = rows[0].find_all("th") if rows[0].find("th") else []
-    # The match columns are in the header as links like "MEX RSA 1-0"
-    # Extract from the leaderboard page heading table
+    # ── Step 1: find match columns from header links ──
+    # Header cells contain links whose text is like "MEX RSA 1-0"
     matches = []
-    # Find all th/td in first two rows to locate match columns
-    for row in rows[:3]:
-        for cell in row.find_all(["th","td"]):
+    header_row = all_rows[0]
+    for cell in header_row.find_all(["th", "td"]):
+        txt = cell.get_text(strip=True)
+        # pattern: 3-letter 3-letter space score/---
+        m = re.match(r'^([A-Z]{2,4})\s+([A-Z]{2,4})\s+([\d]+-[\d]+|---)$', txt)
+        if m:
+            matches.append({
+                "label":  f"{m.group(1)} {m.group(2)}",
+                "result": m.group(3),
+            })
+
+    if not matches:
+        # fallback: also check second row
+        for cell in all_rows[1].find_all(["th","td"]):
             txt = cell.get_text(strip=True)
-            # Match pattern: "ABC DEF 1-0" or "ABC DEF ---"
-            m = re.match(r'^([A-Z]{2,4})\s+([A-Z]{2,4})\s+([\d\-]+|---)$', txt)
+            m = re.match(r'^([A-Z]{2,4})\s+([A-Z]{2,4})\s+([\d]+-[\d]+|---)$', txt)
             if m:
                 matches.append({"label": f"{m.group(1)} {m.group(2)}", "result": m.group(3)})
 
-    # ── Parse player rows ──
+    num_matches = len(matches)
+
+    # ── Step 2: find which column index the first match prediction starts ──
+    # Player rows: col0=pos, col1=+/-, col2=name, col3..col3+N-1=match preds,
+    #              col[-4]=md_pts, col[-3]=bonus, col[-2]=wins, col[-1]=total
+    # So pred columns are [3 .. 3+num_matches-1]
+    PRED_START = 3
+
+    # ── Step 3: parse player rows ──
     players = []
-    for row in rows:
+    for row in all_rows[1:]:
         cells = row.find_all("td")
-        if len(cells) < 5:
+        if len(cells) < PRED_START + num_matches:
             continue
         pos_text = cells[0].get_text(strip=True).replace(".", "")
         if not pos_text.isdigit():
@@ -159,26 +200,21 @@ def fetch_predictions(matchday=1):
         if not name:
             continue
 
-        # Prediction columns: cells[3] to cells[3+len(matches)-1]
         preds = []
-        for i in range(len(matches)):
-            col = 3 + i
-            if col < len(cells):
-                raw = cells[col].get_text(strip=True)
-                # Sometimes score and points are concatenated e.g. "1-09" → split on digit after score
-                m2 = re.match(r'^(\d+-\d+)', raw)
-                preds.append(m2.group(1) if m2 else raw[:3] if raw else "—")
-            else:
-                preds.append("—")
+        pts_list = []
+        for i in range(num_matches):
+            raw = cells[PRED_START + i].get_text(strip=True)
+            pred, pts = split_pred_pts(raw)
+            preds.append(pred)
+            pts_list.append(pts)
 
-        md_pts = cells[-4].get_text(strip=True) or "0"
-        total  = cells[-1].get_text(strip=True) or "0"
+        total = cells[-1].get_text(strip=True) or "0"
 
         players.append({
             "pos":    int(pos_text),
             "name":   name,
             "preds":  preds,
-            "md_pts": md_pts,
+            "pts":    pts_list,
             "total":  total,
         })
 
@@ -189,7 +225,7 @@ def fetch_schedule(matchday=None):
     params = {"tippsaisonId": SEASON_ID}
     if matchday:
         params["spieltagIndex"] = matchday
-    soup = get(f"{BASE}/schedule", params)
+    soup = get_soup(f"{BASE}/schedule", params)
     matches = []
     for row in soup.select("table tr"):
         cells = row.find_all("td")
@@ -205,12 +241,13 @@ def fetch_schedule(matchday=None):
         matches.append({"date":date,"home":home,"away":away,"group":group,"result":result})
     return matches
 
+
 # ── Formatters ────────────────────────────────────────────────────────────────
 
 def format_leaderboard(players, title):
     if not players:
         return "⚠️ Could not load leaderboard."
-    medal = {1:"🥇",2:"🥈",3:"🥉"}
+    medal = {1:"🥇", 2:"🥈", 3:"🥉"}
     lines = [f"🏆 *{title}*\n",
              "`Pos  Name              Pts  Tot`",
              "`───  ────────────────  ───  ───`"]
@@ -223,90 +260,96 @@ def format_leaderboard(players, title):
 
 
 def format_predictions(matches, players, label):
-    """
-    For each match, show the actual score and each player's prediction with emoji.
-    """
     if not matches:
-        return "⚠️ No prediction data found."
+        return "⚠️ No match data found for this matchday."
+    if not players:
+        return "⚠️ No prediction data found — predictions may not be visible yet."
 
     lines = [f"🔮 *Predictions — {label}*\n"]
 
     for i, match in enumerate(matches):
         result = match["result"]
-        result_str = f"*{result}*" if result != "---" else "_not played yet_"
+        if result and result != "---":
+            result_str = f"*{result}* (final)"
+        else:
+            result_str = "_not played yet_"
+
         lines.append(f"⚽ *{match['label']}* → {result_str}")
 
         for p in players:
-            pred = p["preds"][i] if i < len(p["preds"]) else "—"
-            if pred and pred not in ("—", "---", ""):
-                emoji = result_emoji(result, pred, pred) if "-" in pred else ""
-                # Actually compare prediction vs result properly
-                if result and result != "---" and "-" in pred:
-                    try:
-                        rh, ra = map(int, result.split("-"))
-                        ph, pa = map(int, pred.split("-"))
-                        if rh == ph and ra == pa:
-                            em = "✅"
-                        elif (rh>ra and ph>pa) or (rh<ra and ph<pa) or (rh==ra and ph==pa):
-                            em = "🎯"
-                        else:
-                            em = "❌"
-                    except Exception:
-                        em = ""
-                else:
-                    em = ""
-                lines.append(f"  {em} *{p['name']}*: {pred}")
+            pred = p["preds"][i] if i < len(p["preds"]) else ""
+            pts  = p["pts"][i]   if i < len(p["pts"])   else ""
+
+            if pred and pred != "---":
+                em = pred_emoji(result, pred)
+                pts_str = f"  (+{pts}pts)" if pts else ""
+                lines.append(f"  {em} *{p['name']}*: `{pred}`{pts_str}")
             else:
                 lines.append(f"  ➖ *{p['name']}*: no tip")
 
-        lines.append("")  # blank line between matches
+        lines.append("")  # spacer between matches
 
-    lines.append("_✅ exact · 🎯 correct tendency · ❌ wrong_")
+    lines.append("_✅ exact · 🎯 correct tendency · ❌ wrong · 🔮 not played_")
     return "\n".join(lines)
 
 
-def format_today(all_matches, all_preds_by_md):
+def format_today(schedule_matches, matches, players):
     now = datetime.now()
-    date_prefixes = [f"{now.month}/{now.day}/{str(now.year)[2:]}",
-                     f"{now.month}/{now.day}/{now.year}"]
+    date_prefixes = [
+        f"{now.month}/{now.day}/{str(now.year)[2:]}",
+        f"{now.month}/{now.day}/{now.year}",
+    ]
+    today = [m for m in schedule_matches
+             if any(m["date"].startswith(p) for p in date_prefixes)]
 
-    today = [m for m in all_matches if any(m["date"].startswith(p) for p in date_prefixes)]
     if not today:
         return "📅 No matches today."
 
-    lines = [f"📅 *Today's Matches — {now.strftime('%b %d')}*\n"]
+    lines = [f"📅 *Today — {now.strftime('%b %d')}*\n"]
+
     for m in today:
         hf = flag(m["home"])
         af = flag(m["away"])
-        if m["result"] and m["result"] != "---":
-            lines.append(f"{hf} {m['home']} *{m['result']}* {m['away']} {af}")
+        result = m["result"]
+
+        if result and result != "---":
+            lines.append(f"{hf} *{m['home']}* {result} *{m['away']}* {af}  _{m['group']}_")
         else:
             time_part = " ".join(m["date"].split()[-2:])
-            lines.append(f"{hf} {m['home']} vs {m['away']} {af}  _{time_part}_")
+            lines.append(f"{hf} {m['home']} vs {m['away']} {af}  _{time_part} · {m['group']}_")
 
-        # Show predictions for this match from the predictions data
-        match_key = f"{m['home'][:3].upper()} {m['away'][:3].upper()}"
-        for md_matches, players in all_preds_by_md:
-            for i, pm in enumerate(md_matches):
-                if pm["label"] == match_key or match_key in pm["label"]:
-                    for p in players:
-                        pred = p["preds"][i] if i < len(p["preds"]) else "—"
-                        if pred and pred not in ("—","---",""):
-                            if m["result"] and m["result"] != "---" and "-" in pred:
-                                try:
-                                    rh,ra = map(int, m["result"].split("-"))
-                                    ph,pa = map(int, pred.split("-"))
-                                    if rh==ph and ra==pa: em="✅"
-                                    elif (rh>ra and ph>pa) or (rh<ra and ph<pa) or (rh==ra and ph==pa): em="🎯"
-                                    else: em="❌"
-                                except: em=""
-                            else:
-                                em="🔮"
-                            lines.append(f"  {em} {p['name']}: {pred}")
-                        else:
-                            lines.append(f"  ➖ {p['name']}: no tip")
+        # Match this game to prediction columns by label
+        home_abbr = m["home"][:3].upper()
+        away_abbr = m["away"][:3].upper()
+        # Special cases
+        abbr_map = {"BOS": "BIH", "TUR": "TUR", "SCO": "SCO"}
+        home_abbr = abbr_map.get(home_abbr, home_abbr)
+        away_abbr = abbr_map.get(away_abbr, away_abbr)
+
+        col_idx = None
+        for idx, pm in enumerate(matches):
+            parts = pm["label"].split()
+            if len(parts) == 2:
+                if (parts[0] == home_abbr or home_abbr in parts[0]) and \
+                   (parts[1] == away_abbr or away_abbr in parts[1]):
+                    col_idx = idx
+                    break
+
+        if col_idx is not None:
+            for p in players:
+                pred = p["preds"][col_idx] if col_idx < len(p["preds"]) else ""
+                pts  = p["pts"][col_idx]   if col_idx < len(p["pts"])   else ""
+                if pred and pred != "---":
+                    em = pred_emoji(result, pred)
+                    pts_str = f" (+{pts})" if pts else ""
+                    lines.append(f"  {em} {p['name']}: `{pred}`{pts_str}")
+                else:
+                    lines.append(f"  ➖ {p['name']}: no tip")
         lines.append("")
+
+    lines.append("_✅ exact · 🎯 tendency · ❌ wrong · 🔮 not played_")
     return "\n".join(lines)
+
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
@@ -377,28 +420,21 @@ async def cmd_scores(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(e)
         text = f"❌ Error: {e}"
-    # Telegram has 4096 char limit — split if needed
-    if len(text) > 4000:
-        parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-        for part in parts:
-            await update.message.reply_text(part, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown")
+    # Split if over Telegram's 4096 char limit
+    for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
+        await update.message.reply_text(chunk, parse_mode="Markdown")
 
 async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Fetching today's matches…")
     try:
-        all_matches = []
-        all_preds_by_md = []
-        for md in range(1, 4):
-            all_matches.extend(fetch_schedule(matchday=md))
-            mp = fetch_predictions(matchday=md)
-            all_preds_by_md.append(mp)
-        text = format_today(all_matches, all_preds_by_md)
+        schedule = fetch_schedule(matchday=1)
+        matches, players = fetch_predictions(matchday=1)
+        text = format_today(schedule, matches, players)
     except Exception as e:
         logger.error(e)
         text = f"❌ Error: {e}"
     await update.message.reply_text(text, parse_mode="Markdown")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
